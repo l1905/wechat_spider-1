@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,12 +32,13 @@ type Processor interface {
 type BaseProcessor struct {
 	req          *http.Request
 	lastId       string
+	offset       int
 	data         []byte
 	urlResults   []*UrlResult
 	detailResult *DetailResult
 	historyUrl   string
 	biz          string
-
+	token        string
 	// The index of urls for detail page
 	currentIndex int
 
@@ -72,6 +74,7 @@ var (
 	)
 	urlRegex    = regexp.MustCompile(`http://mp.weixin.qq.com/s?[^#"',]*`)
 	idRegex     = regexp.MustCompile(`"id":(\d+)`)
+	tokenRegex  = regexp.MustCompile(`"(.*)"`)
 	MsgNotFound = errors.New("MsgLists not found")
 
 	TypeList   = "list"
@@ -111,6 +114,7 @@ func (p *BaseProcessor) ProcessList(resp *http.Response, ctx *goproxy.ProxyCtx) 
 		return
 	}
 
+	// if ctx.Req.URL.Path == `/mp/profile_ext` && (ctx.Req.URL.Query().Get("action") == "home" || ctx.Req.URL.Query().Get("action") == "getmsg")
 	if rootConfig.AutoScroll {
 		if err = p.processPages(); err != nil {
 			return
@@ -130,6 +134,7 @@ func (p *BaseProcessor) ProcessDetail(resp *http.Response, ctx *goproxy.ProxyCtx
 	if err = resp.Body.Close(); err != nil {
 		return
 	}
+	// p.logf("process detail.......")
 	data = buf.Bytes()
 	p.detailResult = &DetailResult{Id: genId(p.req.URL.String()), Url: p.req.URL.String(), Data: data}
 	return
@@ -147,6 +152,9 @@ func (p *BaseProcessor) ProcessMetrics(resp *http.Response, ctx *goproxy.ProxyCt
 		return
 	}
 	data = buf.Bytes()
+	str := buf.String()
+	p.logf("stat===========%v", data)
+	p.logf("string===========%s", str)
 	detailResult := &DetailResult{}
 	e := json.Unmarshal(data, detailResult)
 	if e != nil {
@@ -195,6 +203,13 @@ func (p *BaseProcessor) Output() {
 	}
 	fmt.Println(strings.Join(urls, ","))
 	fmt.Println("]")
+
+	//同时打印进入详情页面，URL 点赞
+	fmt.Println("\n1111=============\n")
+	// fmt.Printf("url %s %s is being spidered\n", p.DetailResult().Id, p.DetailResult().Url)
+	fmt.Printf("\n2222=============\n")
+	// fmt.Printf("url %s %s metric %#v is being spidered\n", p.DetailResult().Id, p.DetailResult().Url, p.DetailResult().Appmsgstat)
+	fmt.Printf("\n3333=============\n")
 }
 
 //Parse the html
@@ -202,14 +217,33 @@ func (p *BaseProcessor) processMain() error {
 	p.urlResults = make([]*UrlResult, 0, 100)
 	buffer := bytes.NewBuffer(p.data)
 	var msgs string
+	var token string
 	str, err := buffer.ReadString('\n')
-	for err == nil {
-		if strings.Contains(str, "msgList = ") {
-			msgs = str
-			break
+	// general_msg_list
+	if strings.Contains(str, "general_msg_list") {
+		msgs = str
+	} else {
+		for err == nil {
+			if strings.Contains(str, "window.appmsg_token =") {
+				token = str
+			}
+			// p.logf("str-----%s", str)
+			if strings.Contains(str, "msgList = ") {
+				msgs = str
+				break
+			}
+			str, err = buffer.ReadString('\n')
 		}
-		str, err = buffer.ReadString('\n')
 	}
+	if token != "" {
+		p.logf("str-----token-----%s", token)
+		tokenMatcher := tokenRegex.FindAllStringSubmatch(token, -1)
+		if len(tokenMatcher) >= 1 {
+			p.token = tokenMatcher[0][1]
+			p.logf("str-----p.token-----%s", p.token)
+		}
+	}
+
 	if msgs == "" {
 		return stacktrace.Propagate(MsgNotFound, "Failed parse main")
 	}
@@ -227,13 +261,15 @@ func (p *BaseProcessor) processMain() error {
 	if len(idMatcher) < 1 {
 		return stacktrace.Propagate(MsgNotFound, "Failed find id in  main")
 	}
+	// p.logf("idMatcher length................ %d", len(idMatcher))
 	p.lastId = idMatcher[len(idMatcher)-1][1]
+	p.offset = p.offset + len(idMatcher) + 1
 	return nil
 }
 
 func (p *BaseProcessor) processPages() (err error) {
 	var pageUrl = p.genPageUrl()
-	p.logf("process pages....")
+	// p.logf("process pages....====================%s", pageUrl)
 	req, err := http.NewRequest("GET", pageUrl, nil)
 	if err != nil {
 		return stacktrace.Propagate(err, "Failed new page request")
@@ -258,7 +294,8 @@ func (p *BaseProcessor) processPages() (err error) {
 		return stacktrace.Propagate(err, "Failed get page id")
 	}
 	p.lastId = idMatcher[len(idMatcher)-1][1]
-	p.logf("Page Get => %d,lastid: %s", len(result), p.lastId)
+	p.offset = p.offset + len(idMatcher) + 1
+	p.logf("Page Get => %d,lastid: %s, offset: %d", len(result), p.lastId, p.offset)
 	for _, u := range result {
 		p.urlResults = append(p.urlResults, &UrlResult{Url: u})
 	}
@@ -270,8 +307,25 @@ func (p *BaseProcessor) processPages() (err error) {
 }
 
 func (p *BaseProcessor) genPageUrl() string {
-	urlStr := "http://mp.weixin.qq.com/mp/getmasssendmsg?" + p.req.URL.RawQuery
-	urlStr += "&frommsgid=" + p.lastId + "&f=json&count=100"
+
+	a := p.req.URL.Query()
+	a.Set("offset", strconv.Itoa(p.offset))
+	a.Set("action", "getmsg")
+	a.Set("count", "10")
+	a.Set("f", "json")
+	a.Set("is_ok", "1")
+	a.Set("uin", "777")
+	a.Set("key", "777")
+
+	a.Set("appmsg_token", p.token)
+
+	a.Set("x5", "1")
+
+	rawUrl := a.Encode()
+	urlStr := "http://mp.weixin.qq.com/mp/profile_ext?" + rawUrl
+
+	p.logf("pageUrl+++++++++++++++%s, offset:=======%d", urlStr, p.offset)
+
 	return urlStr
 }
 

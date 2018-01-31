@@ -25,10 +25,11 @@ func ProxyHandle(proc Processor) func(resp *http.Response, ctx *goproxy.ProxyCtx
 		if rootConfig.Verbose {
 			Logger.Println("Hijacked of", ctx.Req.URL.RequestURI())
 		}
-
-		if ctx.Req.URL.Path == `/mp/getmasssendmsg` || (ctx.Req.URL.Path == `/mp/profile_ext` && ctx.Req.URL.Query().Get("action") == "home") {
+		if ctx.Req.URL.Path == `/mp/profile_ext` && (ctx.Req.URL.Query().Get("action") == "home" || ctx.Req.URL.Query().Get("action") == "getmsg") {
+			// if ctx.Req.URL.Path == `/mp/getmasssendmsg` || (ctx.Req.URL.Path == `/mp/profile_ext` && ctx.Req.URL.Query().Get("action") == "home") {
 			handleList(resp, ctx, proc)
 			header = ctx.Req.Header
+
 		} else if ctx.Req.URL.Path == `/s` {
 			header = ctx.Req.Header
 			handleDetail(resp, ctx, proc)
